@@ -15,7 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from data_prep.SlicesDataset import SlicesDataset
 from utils.utils import log_to_tensorboard
-from utils.volume_stats import Dice3d, Jaccard3d
+from utils.volume_stats import Dice3d, Jaccard3d, sensitivity_specificity, dice_per_class
 from networks.RecursiveUNet import UNet
 from inference.UNetInferenceAgent import UNetInferenceAgent
 
@@ -97,8 +97,8 @@ class UNetExperiment:
             # shape [BATCH_SIZE, 1, PATCH_SIZE, PATCH_SIZE] into variables data and target. 
             # Feed data to the model and feed target to the loss function
             # 
-            # data = <YOUR CODE HERE>
-            # target = <YOUR CODE HERE>
+            data = batch["image"].to(device=self.device, dtype=torch.float)
+            target = batch["seg"].to(device=self.device, dtype=torch.long)
 
             prediction = self.model(data)
 
@@ -109,7 +109,10 @@ class UNetExperiment:
             loss = self.loss_function(prediction, target[:, 0, :, :])
 
             # TASK: What does each dimension of variable prediction represent?
-            # ANSWER:
+            # ANSWER: SHape here is[BATCH_SIZE, CHANNELS, PATCH_SIZE, PATCH_SIZE]
+            # BATCH_SIZE : corresponds to batch_size defined in run_ml_pipeline.py
+            # CHANNELS : number of output channel, here its 3 as its multi class segmentation
+            # PATCH_SIZE : 2D patch_size defined in run_ml_pipeline.py
 
             loss.backward()
             self.optimizer.step()
@@ -154,6 +157,16 @@ class UNetExperiment:
                 
                 # TASK: Write validation code that will compute loss on a validation sample
                 # <YOUR CODE HERE>
+                data = batch["image"].to(device=self.device, dtype=torch.float)
+                target = batch["seg"].to(device=self.device, dtype=torch.long)
+
+                prediction = self.model(data)
+
+                # We are also getting softmax'd version of prediction to output a probability map
+                # so that we can see how the model converges to the solution
+                prediction_softmax = F.softmax(prediction, dim=1)
+
+                loss = self.loss_function(prediction, target[:, 0, :, :])
 
                 print(f"Batch {i}. Data shape {data.shape} Loss {loss}")
 
@@ -218,6 +231,10 @@ class UNetExperiment:
         out_dict["volume_stats"] = []
         dc_list = []
         jc_list = []
+        dc_anterior_list = []
+        dc_posterior_list = []
+        sensitivity_list = []
+        specificity_list = []
 
         # for every in test set
         for i, x in enumerate(self.test_data):
@@ -244,16 +261,30 @@ class UNetExperiment:
             # * Dice-per-slice and render combined slices with lowest and highest DpS
             # * Dice per class (anterior/posterior)
 
+            sensitivity, specificity = sensitivity_specificity(pred_label, x["seg"])
+            sensitivity_list.append(sensitivity)
+            specificity_list.append(specificity)
+
+            dice_scores_class = dice_per_class(pred_label, x["seg"], 3)
+            dice_anterior = dice_scores_class["Class 1"]
+            dice_posterior = dice_scores_class["Class 2"]
+            dc_anterior_list.append(dice_anterior)
+            dc_posterior_list.append(dice_posterior)
+            
             out_dict["volume_stats"].append({
                 "filename": x['filename'],
                 "dice": dc,
-                "jaccard": jc
+                "jaccard": jc,
+                "sensitivity" : sensitivity,
+                "specificity" : specificity,
+                "dice_anterior" : dice_anterior,
+                "dice_posterior" : dice_posterior
                 })
             print(f"{x['filename']} Dice {dc:.4f}. {100*(i+1)/len(self.test_data):.2f}% complete")
 
         out_dict["overall"] = {
-            "mean_dice": np.mean(dc_list),
-            "mean_jaccard": np.mean(jc_list)}
+            "mean_dice": round(np.mean(dc_list), 2),
+            "mean_jaccard": round(np.mean(jc_list), 2)}
 
         print("\nTesting complete.")
         return out_dict
